@@ -1,6 +1,7 @@
 import os
 import logging
 from collections import OrderedDict
+import re
 from typing import List, Dict
 from transformers import BertTokenizer
 from .serializer import Serializer
@@ -8,6 +9,7 @@ from .vocab import Vocab
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from utils import save_pkl, load_csv
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ def _add_pos_seq(train_data: List[Dict], cfg):
         train_data (List[Dict]) : 数据集合
         cfg : 配置文件
     """
-    for d in train_data:
+    for d in tqdm(train_data):
         entities_idx = [d['head_idx'], d['tail_idx']
                         ] if d['head_idx'] < d['tail_idx'] else [d['tail_idx'], d['head_idx']]
 
@@ -62,6 +64,7 @@ def _add_pos_seq(train_data: List[Dict], cfg):
                 # 比如： [head, ... tail] or [... head, tail, ...] 无法使用统一方式 mask 分段
                 d['entities_pos'] = [1] * (entities_idx[0] + 1) + [2] * (entities_idx[1] - entities_idx[0] - 1) +\
                                     [3] * (d['seq_len'] - entities_idx[1])
+
 
 
 def _convert_tokens_into_index(data: List[Dict], vocab):
@@ -87,10 +90,24 @@ def _serialize_sentence(data: List[Dict], serial, cfg):
         serial (Class): Serializer类
         cfg : 配置文件
     """
-    for d in data:
+    ans = 0
+    for d in tqdm(data):
         sent = d['sentence'].strip()
-        sent = sent.replace(d['head'], ' head ', 1).replace(d['tail'], ' tail ', 1)
+        '''
+        ans += 1
+        if ans >= 66434:
+            print('='*100)
+            print(sent)
+            print(d['head'])
+            print(d['tail'])
+        '''
+        #针对可能存在包含的现象，比如两个实体：“中华民族”和“民族”，这是两个不同的实体
+        if d['head'] in sent.replace(d['tail'], ' tail ', 1):
+            sent = sent.replace(d['tail'], ' tail ', 1).replace(d['head'], ' head ', 1)
+        else:
+            sent = sent.replace(d['head'], ' head ', 1).replace(d['tail'], ' tail ', 1)
         d['tokens'] = serial(sent, never_split=['head', 'tail'])
+            
         head_idx, tail_idx = d['tokens'].index('head'), d['tokens'].index('tail')
         d['head_idx'], d['tail_idx'] = head_idx, tail_idx
 
@@ -104,7 +121,6 @@ def _serialize_sentence(data: List[Dict], serial, cfg):
                 d['tokens'][head_idx], d['tokens'][tail_idx] = 'HEAD', 'TAIL'
             else:
                 d['tokens'][head_idx], d['tokens'][tail_idx] = d['head'], d['tail']
-
 
 def _lm_serialize(data: List[Dict], cfg):
     """
@@ -155,6 +171,26 @@ def _handle_relation_data(relation_data: List[Dict]) -> Dict:
 
     return rels
 
+
+def is_true_setence(setence,head,tail):#判断句子是否符合三元组表示要求
+    if head not in setence.replace(tail,'',1) and tail not in setence.replace(head,'',1):
+        return False#舍去
+    if head not in setence or tail not in setence:
+        return False
+    return True
+
+def clean_data(data):#数据清洗，去除不符合要求的脏乱数据
+    true_data = []
+    false_data = []
+    for d in data:
+        if is_true_setence(d['sentence'].strip(),d['head'],d['tail']):
+            true_data.append(d)
+        else:
+            false_data.append(d)
+    logger.info('These data do not meet the requirements....')
+    for d in false_data:
+        logger.info(d)
+    return true_data
 def preprocess(cfg):
     """
     数据预处理阶段
@@ -171,6 +207,11 @@ def preprocess(cfg):
     test_data = load_csv(test_fp)
     relation_data = load_csv(relation_fp)
 
+    logger.info('clean data...')
+    train_data = clean_data(train_data)
+    valid_data = clean_data(valid_data)
+    test_data = clean_data(test_data)
+
     logger.info('convert relation into index...')
     rels = _handle_relation_data(relation_data)
     _add_relation_data(rels, train_data)
@@ -185,6 +226,7 @@ def preprocess(cfg):
         _lm_serialize(test_data, cfg)
     else:
         logger.info('serialize sentence into tokens...')
+        print('cfg.chinese_split = ',cfg.chinese_split)
         serializer = Serializer(do_chinese_split=cfg.chinese_split, do_lower_case=True)
         serial = serializer.serialize
         _serialize_sentence(train_data, serial, cfg)
